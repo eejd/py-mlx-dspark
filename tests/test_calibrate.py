@@ -386,6 +386,43 @@ def test_small_m_gated_off_on_m5(monkeypatch):
         run("applegpu_g17")
 
 
+def test_small_m_cap_is_cached_with_the_verdicts(monkeypatch, tmp_path):
+    """The split-K cap a GPU forced during calibration (M1/M2, PR #39) is stored with the
+    shape verdicts and re-applied on a cached load — otherwise the next process would dispatch
+    the full geometry its driver refuses. Entries written before the field mean the full cap."""
+    import sys
+
+    import mlx.core as mx
+    import pytest
+
+    calib = sys.modules["mlx_dspark.calibrate"]
+    smm = sys.modules["mlx_dspark.small_m_qmm"]
+    sk = sys.modules["mlx_dspark.skinny_qmm"]
+    monkeypatch.setattr(mx, "device_info", lambda: {"architecture": "applegpu_g14s"})
+
+    def measured(*a, **k):
+        sk.set_s_cap(8)                     # what a refused 1024/512-thread launch leaves
+        return ["2048x512b4"]
+    monkeypatch.setattr(smm, "measure_shapes", measured)
+
+    def run():
+        return calib.small_m_qmm_shapes(object(), target_repo="m", cache_dir=str(tmp_path),
+                                        verbose=False)
+    try:
+        assert run() == ["2048x512b4"] and sk.s_cap() == 8
+        sk.set_s_cap(sk.S_MAX)              # a fresh process
+        monkeypatch.setattr(smm, "measure_shapes", lambda *a, **k: pytest.fail("re-measured"))
+        assert run() == ["2048x512b4"] and sk.s_cap() == 8      # restored from the cache
+        key = calib._cache_key("smallm", "old", None)
+        calib.save_cached(key, {"shapes": ["2048x512b4"]}, str(tmp_path))
+        sk.set_s_cap(8)
+        calib.small_m_qmm_shapes(object(), target_repo="old", cache_dir=str(tmp_path),
+                                 verbose=False)
+        assert sk.s_cap() == sk.S_MAX                           # pre-field entry: full cap
+    finally:
+        sk.set_s_cap(sk.S_MAX)
+
+
 class TestBandwidthCache:
     """The bandwidth microbench is measured once per chip x mlx and cached like the curves."""
 

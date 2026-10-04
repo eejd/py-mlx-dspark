@@ -43,8 +43,10 @@ def anthropic_env(base_url: str, model: str, api_key: str | None) -> dict[str, s
     return env
 
 
-def integrations(base_url: str, model: str, api_key: str | None) -> list[dict]:
-    """Every supported agent, each with a ready-to-use config.
+def integrations(base_url: str, model: str, api_key: str | None,
+                 context_window: int | None = None) -> list[dict]:
+    """Every supported agent, each with a ready-to-use config. ``context_window`` (the served
+    target's, when known) fills the per-model limits agents like pi ask for.
 
     Each descriptor:
       ``id`` / ``name``      — stable key and display name
@@ -86,11 +88,13 @@ def integrations(base_url: str, model: str, api_key: str | None) -> list[dict]:
                 {"kind": "file",
                  "label": "Add a provider to ~/.codex/config.toml",
                  "path": "~/.codex/config.toml",
-                 "content": _codex_toml(openai, model, key)},
+                 "content": _codex_toml(openai, model)},
                 {"kind": "command",
                  "label": "Then run",
-                 "command": "codex --profile mlx-dspark"},
+                 "command": f"MLX_DSPARK_KEY={key} codex --profile mlx-dspark"},
             ],
+            "note": "Codex only speaks the Responses API (`wire_api = \"responses\"`); the "
+                    "server serves it at /v1/responses.",
         },
         {
             "id": "opencode",
@@ -107,16 +111,21 @@ def integrations(base_url: str, model: str, api_key: str | None) -> list[dict]:
         {
             "id": "pi",
             "name": "pi",
-            "protocol": "openai",
-            "summary": "The pi coding agent, via a custom provider in models.json.",
+            "protocol": "anthropic",
+            "summary": "The pi coding agent, via a custom provider in its models.json.",
             "setup": [
                 {"kind": "file",
-                 "label": "Add to ~/.pi/models.json",
-                 "path": "~/.pi/models.json",
-                 "content": _pi_json(openai, model, key)},
+                 "label": "Add to ~/.pi/agent/models.json",
+                 "path": "~/.pi/agent/models.json",
+                 "content": _pi_json(base_url, model, key, context_window)},
+                {"kind": "command",
+                 "label": "Then run",
+                 "command": f"pi --provider mlx-dspark --model {model}"},
             ],
             "note": "pi's system prompt is small (~1.5k tokens vs Claude Code's ~18–26k), so "
-                    "it feels much faster on a local model — prefill dominates the clock.",
+                    "it feels much faster on a local model — prefill dominates the clock. "
+                    "It works on either endpoint: set \"api\" to \"openai-completions\" and "
+                    f"\"baseUrl\" to {openai} for the OpenAI one.",
         },
         {
             "id": "openai-compatible",
@@ -148,17 +157,17 @@ def _claude_command(base_url: str, api_key: str | None) -> str:
     return " ".join(parts)
 
 
-def _codex_toml(openai_base: str, model: str, key: str) -> str:
+def _codex_toml(openai_base: str, model: str) -> str:
+    # Codex dropped Chat Completions: a "chat" provider no longer works at all.
     return (
         '[model_providers.mlx-dspark]\n'
         'name = "mlx-dspark"\n'
         f'base_url = "{openai_base}"\n'
-        'wire_api = "chat"\n'
+        'wire_api = "responses"\n'
         'env_key = "MLX_DSPARK_KEY"\n\n'
         '[profiles.mlx-dspark]\n'
         'model_provider = "mlx-dspark"\n'
         f'model = "{model}"\n'
-        f'# export MLX_DSPARK_KEY={key}\n'
     )
 
 
@@ -178,16 +187,22 @@ def _opencode_json(openai_base: str, model: str, key: str) -> str:
     }, indent=2)
 
 
-def _pi_json(openai_base: str, model: str, key: str) -> str:
+def _pi_json(base_url: str, model: str, key: str, context_window: int | None) -> str:
+    """The README-tested form: ``~/.pi/agent/models.json``, camelCase keys, Anthropic
+    endpoint at the bare base URL (pi appends the path itself)."""
     import json
 
+    entry: dict = {"id": model}
+    if context_window:
+        entry["contextWindow"] = int(context_window)
+        entry["maxTokens"] = min(8192, int(context_window))
     return json.dumps({
         "providers": {
             "mlx-dspark": {
-                "type": "openai",
-                "base_url": openai_base,
-                "api_key": key,
-                "models": [{"id": model, "name": f"{model} (mlx-dspark)"}],
+                "baseUrl": base_url.rstrip("/"),
+                "api": "anthropic-messages",
+                "apiKey": key,
+                "models": [entry],
             }
         }
     }, indent=2)

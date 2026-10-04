@@ -180,3 +180,81 @@ def test_measure_shapes_returns_verified_subset():
     # an ineligible model yields nothing
     small = _Tiny(out_features=1020)
     assert measure_shapes(small) == []
+
+
+# ---- threadgroup ceilings (M1/M2, PR #39) ----------------------------------------------
+
+
+class _Ceiling:
+    """The real kernel behind an M1/M2-style driver: launches wider than ``limit`` threads
+    raise mlx's refusal (an M2 Pro refuses this kernel at 1024 threads and again at 512)."""
+
+    def __init__(self, real, limit):
+        self.real, self.limit, self.refused = real, limit, 0
+
+    def __call__(self, **kw):
+        t = kw["threadgroup"][0]
+        if t > self.limit:
+            self.refused += 1
+            raise ValueError(f"[metal::Device] Thread group size ({t}) is greater than the "
+                             f"maximum allowed threads per threadgroup ({self.limit}).")
+        return self.real(**kw)
+
+
+@pytest.fixture
+def ceiling(monkeypatch):
+    from mlx_dspark import skinny_qmm as sk
+
+    real = sk._kernel()
+
+    def install(limit):
+        fake = _Ceiling(real, limit)
+        monkeypatch.setattr(sk, "_kernel", lambda: fake)
+        return fake
+
+    yield install
+    sk.set_s_cap(sk.S_MAX)
+
+
+class _ThreeWidths(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = _qlinear(out_features=64)       # n < 1024: S=32, 1024 threads
+        self.kv = _qlinear(out_features=1024)       # 1024 <= n < 4096: S=16, 512 threads
+        self.up = _qlinear(out_features=4096)       # wide: S=8, 256 threads
+
+
+def test_threadgroup_refusal_lowers_the_cap_instead_of_aborting(ceiling):
+    from mlx_dspark import skinny_qmm as sk
+
+    fake = ceiling(448)
+    model = _ThreeWidths()
+    shapes = measure_shapes(model)                  # raised and aborted the load before
+    assert fake.refused > 0
+    assert 1 <= sk.s_cap() <= 8                     # 32 and 16 refused at 448 threads
+    x = (mx.random.normal((8, K)) * 0.1).astype(mx.bfloat16)
+    for mod in (model.gate, model.kv, model.up):
+        assert sk.geometry(int(mod["weight"].shape[0]))[1] * 32 <= 448
+        mx.eval(sk.call(mod, x, 8))                 # the dispatch geometry launches too
+    assert set(shapes) <= {shape_key(m) for m in (model.gate, model.kv, model.up)}
+
+
+def test_no_launchable_geometry_turns_the_kernel_off(ceiling):
+    ceiling(16)                                     # below a single simdgroup
+    assert measure_shapes(_ThreeWidths()) == []
+
+
+def test_unrefused_gpus_keep_the_full_geometry():
+    from mlx_dspark import skinny_qmm as sk
+
+    q = _qlinear(out_features=64)
+    try:                                            # this machine's own driver first
+        mx.eval(sk.qmm(mx.zeros((8, K), dtype=mx.bfloat16), q["weight"], q["scales"],
+                       q["biases"], 4))
+    except ValueError as e:
+        if sk.is_threadgroup_refusal(e):
+            pytest.skip(f"this GPU refuses 1024-thread launches: {e}")
+        raise
+    measure_shapes(_ThreeWidths())
+    assert sk.s_cap() == sk.S_MAX
+    assert [sk.geometry(n)[1] for n in (64, 1024, 4096)] == [32, 16, 8]

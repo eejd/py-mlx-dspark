@@ -81,10 +81,18 @@ def _recurrent_mergeable(c) -> bool:
     — so this is a check on shape-of-cache, not on contents; it has to answer before any
     prefill has run (:func:`batchable` is a capability query).
     """
-    st = getattr(c, "state", None)
+    st = _recurrent_arrays(c)
     return (type(c).__name__ in _RECURRENT_CACHES and not _is_trimmable(c)
             and isinstance(st, (list, tuple)) and len(st) > 0
             and all(s is None or isinstance(s, mx.array) for s in st))
+
+
+def _recurrent_arrays(c):
+    """The per-layer state list of an ``ArraysCache``. Read from ``.cache``, not ``.state``:
+    mlx-lm 0.32.0 widened ``state`` to ``(cache, left_padding, lengths)``, which silently
+    failed the check above and dropped every hybrid to the serialized engine."""
+    st = getattr(c, "cache", None)
+    return st if isinstance(st, list) else getattr(c, "state", None)
 
 
 def batchable(target) -> bool:
@@ -298,8 +306,9 @@ def _merge_row_caches(row_caches: list[list]) -> list:
     for l in range(n_layers):
         proto = row_caches[0][l]
         if _recurrent_mergeable(proto):
-            merged = type(proto)(len(proto.state))
-            for j in range(len(proto.state)):
+            n = len(_recurrent_arrays(proto))
+            merged = type(proto)(n)
+            for j in range(n):
                 merged[j] = mx.contiguous(
                     mx.concatenate([c[l][j] for c in row_caches], axis=0))
             out.append(merged)

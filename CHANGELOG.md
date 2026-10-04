@@ -2,6 +2,21 @@
 
 All notable changes to `mlx-dspark`. Versions follow [SemVer](https://semver.org/) (pre-1.0: minor-ish features land as patch bumps).
 
+## [0.20.2] — 2026-10-04 — works with mlx-lm 0.32, starts on M1/M2, faster sampling
+
+### Fixed
+- **Prefix caching on mlx-lm 0.32.0 (issue #40, reported and diagnosed by @stevenkinlux).** mlx-lm 0.32.0 removed the caches' `meta_state` (ml-explore/mlx-lm#1778) and the checkpoint snapshot read it, so on a fresh install `serve` cut the stream off as soon as a prompt reached a checkpoint — every hybrid target (Qwen3.8, Qwen3.6, Ornith, Bonsai, LFM2.5), wrapped Gemma-4 and DFlash. Snapshots now round-trip through whichever cache API is installed; mlx-lm 0.31.3 and 0.32.0 are both supported and tested, and the `mlx-lm==0.31.3` pin is no longer needed. On the reporter's setup (Qwen3.8-27B-4bit + Red Hat's DSpark head) a ~7k-token agent turn completes and the next turn reuses 6,973 of its 7,128 prompt tokens; restores are bit-identical to the live caches on Qwen3.8 and Gemma-4.
+- **Hybrid targets batch again on mlx-lm 0.32.0.** The same change widened `ArraysCache.state`, which silently failed the batchability check, so `--max-batch` served hybrids one request at a time.
+- **Speculative modes start on M1/M2 again (PR #39, @Tobias-Conrad).** The small-M verify kernel's calibration launched geometries of up to 1024 threads per threadgroup, which M1/M2 GPUs refuse for this kernel (an M2 Pro allows 448–832 depending on the geometry), and the refusal aborted the load. Calibration now steps down to a geometry the GPU accepts — or leaves that shape on mlx's own matmul — and caches it with its verdicts; nothing in calibration can stop a model from loading. M3/M4 are unchanged. (The PR's multi-row attention change was not taken: 0.20.1 already handles refused launches there.)
+- **Codex and pi configs from `/admin/integrations` (the Mac app's Integrations panel).** Codex was given `wire_api = "chat"`, which Codex no longer accepts — now `"responses"`, with the key set in the run command. pi was given a path and keys pi doesn't read — now the README's tested `~/.pi/agent/models.json` form (Anthropic endpoint, the model's context window filled in).
+- The prefix cache's RAM accounting counted recurrent state (on mlx-lm 0.32.0) and `--kv-bits` quantized KV (on every version) as 0 bytes, so the SSD-spill budget never saw them.
+
+### Changed
+- **Sampling no longer sorts the whole vocabulary.** With `top_k` set — the default for every model whose `generation_config` ships one (Qwen3.x, Qwen3.8, Gemma-4, Nanbeige, LFM2.5-2.6B) — each sampled token paid two full sorts of the 150k–262k vocab, ~0.4–0.6 ms on an M4 Pro. The top-k threshold and nucleus cutoff now come from small grouped sorts, and the truncated distribution is bit-identical (same seed, same tokens). Plain decode under those defaults: +2% on Qwen3-4B-8bit, +5% on Qwen3-0.6B-4bit, +2.4% on LFM2.5-8B-A1B; batched and speculative sampling get the same saving per row.
+
+### Docs
+- README: the Qwen3-14B footnote is corrected (it auto-resolves its drafter) and the docs site is linked.
+
 ## [0.20.1] — 2026-09-28 — the multi-row attention kernel stays on for more GPUs
 
 ### Fixed

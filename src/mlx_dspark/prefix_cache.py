@@ -131,13 +131,7 @@ def _layer_trimmable(c) -> bool:
 
 
 def _cache_ram_bytes(cache) -> int:
-    total = 0
-    for c in cache:
-        st = getattr(c, "state", None)
-        if isinstance(st, (list, tuple)):
-            for a in st:
-                total += getattr(a, "nbytes", 0)
-    return total
+    return sum(_tree_bytes(getattr(c, "state", None)) for c in cache)
 
 
 # -- checkpoint snapshots ---------------------------------------------------------------
@@ -146,6 +140,21 @@ def _cache_ram_bytes(cache) -> int:
 # the same pair save_prompt_cache/load_prompt_cache round-trips — held as COPIES. The copies
 # are load-bearing: a wrapped RotatingKVCache writes its ring in place, so handing out the
 # stored arrays would let one request corrupt the snapshot for every later one.
+#
+# mlx-lm 0.32.0 (ml-explore/mlx-lm#1778) folded meta_state into state — `state` alone now
+# round-trips every cache class, scalars included — and removed meta_state. On that version
+# meta is None and only state is set back (issue #40: reading c.meta_state crashed every
+# checkpoint). Older mlx-lm still splits the scalars out, so they ride in meta.
+
+
+def _meta(c):
+    return getattr(c, "meta_state", None)
+
+
+def _set_state(c, state, meta) -> None:
+    c.state = _copy_tree(state)
+    if meta:            # before 0.32 a rotating cache's offset/_idx (and the like) ride here
+        c.meta_state = meta
 
 
 def _copy_tree(v):
@@ -174,7 +183,7 @@ def _eval_tree(v, out=None):
 
 
 def _snapshot(cache, ctx):
-    snap = [(_copy_tree(c.state), c.meta_state) for c in cache]
+    snap = [(_copy_tree(c.state), _meta(c)) for c in cache]
     snap_ctx = None if ctx is None else [(_copy_tree(c.k), _copy_tree(c.v)) for c in ctx]
     _eval_tree([s for s, _ in snap])
     if snap_ctx is not None:
@@ -185,7 +194,7 @@ def _snapshot(cache, ctx):
 def _rung_capture(cache) -> list[tuple[int, object, object]]:
     """Copies of the NON-trimmable layer states only — everything a later partial restore
     can't get by trimming the slot's full snapshot. ``[(layer_idx, state, meta_state)]``."""
-    cap = [(i, _copy_tree(c.state), c.meta_state)
+    cap = [(i, _copy_tree(c.state), _meta(c))
            for i, c in enumerate(cache) if not _layer_trimmable(c)]
     _eval_tree([s for _, s, _ in cap])
     return cap
@@ -207,9 +216,7 @@ def _restore(make_cache, make_ctx, snapshot):
     snap, snap_ctx = snapshot
     cache = make_cache()
     for c, (state, meta) in zip(cache, snap):
-        c.state = _copy_tree(state)     # KVCache derives offset from this; Rotating doesn't
-        if meta:                        # ...so a rotating cache's offset/_idx ride here
-            c.meta_state = meta
+        _set_state(c, state, meta)
     ctx = None
     if snap_ctx is not None and make_ctx is not None:
         ctx = make_ctx()
@@ -220,9 +227,7 @@ def _restore(make_cache, make_ctx, snapshot):
 
 def _snapshot_ram_bytes(snapshot) -> int:
     snap, snap_ctx = snapshot
-    total = sum(getattr(v, "nbytes", 0)
-                for state, _ in snap
-                for v in (state if isinstance(state, (list, tuple)) else [state]))
+    total = sum(_tree_bytes(state) for state, _ in snap)
     if snap_ctx:
         total += sum(getattr(a, "nbytes", 0) for pair in snap_ctx for a in pair)
     return total
@@ -510,10 +515,7 @@ class PrefixCache:
         captured = {i: (st, meta) for i, st, meta in slot.rungs[r]}
         for i, c in enumerate(cache):
             if i in captured:
-                st, meta = captured[i]
-                c.state = _copy_tree(st)
-                if meta:
-                    c.meta_state = meta
+                _set_state(c, *captured[i])
             elif not _layer_trimmable(c):
                 return None, None
         _trim_target(cache, r)

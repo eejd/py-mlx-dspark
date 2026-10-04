@@ -76,6 +76,8 @@ Multi-row attention kernel
 
 **On M5 and newer chips both kernels are off.** The small-M kernel wins the probe's micro-benchmark there but can stall a sustained generation for about 105 seconds, which a micro-benchmark can't detect. The attention kernel stays off until it's verified on M5. `MLX_DSPARK_FORCE_SMALL_M=1` and `MLX_DSPARK_FORCE_MULTIROW=1` override the gates for a comparison run. If you have an M5, paired numbers are very welcome in an issue.
 
+**On M1 and M2 the GPU accepts fewer threads per launch** for these kernels than M3/M4 do. The probes notice when a launch is refused and run the kernel at a size the GPU accepts, or leave that shape on MLX's own path. They never stop the model from loading.
+
 Output stays greedy-correct with either kernel: the model still verifies every token. Token ids can differ from MLX's kernels only at floating-point ties.
 
 ## The calibration cache

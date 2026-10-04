@@ -2374,7 +2374,8 @@ def make_handler(engine: Engine, api_key: str | None):
                 return self._send_json(200, {
                     "base_url": base,
                     "model": engine.model_id,
-                    "integrations": integrations(base, engine.model_id, api_key),
+                    "integrations": integrations(base, engine.model_id, api_key,
+                                                 getattr(engine, "context_window", None)),
                 })
             if route == "/rounds":
                 # Recent rounds as one JSON blob — the pull-based sibling of /events, for

@@ -69,9 +69,16 @@ def test_nanbeige_dspark_config_parses(tmp_path):
 
 def test_register_makes_model_type_resolvable():
     register()                                  # idempotent; True or False both fine here
+    import dataclasses
     import importlib
     mod = importlib.import_module("mlx_lm.models.nanbeige")
-    assert mod.Model is Model and mod.ModelArgs is ModelArgs
+    if mod.Model is not Model:
+        # mlx-lm >= 0.32 ships the module itself and the vendored copy retires. The
+        # Target tap replicates THIS forward loop, so the upstream config contract must
+        # still be the one the copy was written against.
+        assert ({f.name for f in dataclasses.fields(mod.ModelArgs)}
+                == {f.name for f in dataclasses.fields(ModelArgs)})
+        assert isinstance(getattr(mod.ModelArgs, "effective_num_loops", None), property)
     assert register() is False                  # second call is a no-op
     assert _route_target({"model_type": "nanbeige"}) == "mlx_lm"
 

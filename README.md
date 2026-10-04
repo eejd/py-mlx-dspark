@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://arahim.dev/mlx-dspark/"><img src="https://img.shields.io/badge/docs-arahim.dev%2Fmlx--dspark-2563eb" alt="Docs"></a>
   <a href="https://pypi.org/project/mlx-dspark/"><img src="https://img.shields.io/pypi/v/mlx-dspark?color=2563eb" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/mlx-dspark" alt="Python">
   <img src="https://img.shields.io/badge/platform-Apple%20Silicon-111111?logo=apple&logoColor=white" alt="Apple Silicon">
@@ -25,6 +26,9 @@ mlx-dspark runs two EAGLE-family speculative-decoding drafters natively on Apple
 used to accelerate DeepSeek-V4) and z-lab's **DFlash** (block diffusion). Both are **lossless** — the
 target verifies every token, so output is identical to normal decoding — and run under one verify loop,
 so you can serve them, script them, or benchmark them head-to-head.
+
+**Documentation:** [arahim.dev/mlx-dspark](https://arahim.dev/mlx-dspark/) — setup for every agent and
+app, the HTTP API, a model picker, and how speculation behaves on a Mac.
 
 > **What this is *not*:** DeepSeek-V4 inference. The targets are consumer-size models (Gemma-4, Qwen3,
 > Meta's Muse-Glimmer, NVIDIA's Nemotron, PrismML's ternary Bonsai-27B, …) with published DSpark drafters —
@@ -1402,5 +1406,7 @@ are bundled.
 [^q27]: Qwen3.6-27B is measured on the **8-bit** target; the 4-bit target resolves the same
     drafter but is not measured.
 
-[^qwen14b]: Qwen3-14B is not in the auto-resolve registry — pass
-    `--drafter deepseek-ai/dspark_qwen3_14b_block7`.
+[^qwen14b]: Qwen3-14B auto-resolves DeepSeek's official drafter
+    (`deepseek-ai/dspark_qwen3_14b_block7`) like every other row. Its numbers were measured on
+    mlx 0.32.0 (2026-07), before the September kernels, at cap 4 — likely higher today; not
+    re-measured yet.

@@ -181,18 +181,50 @@ def fits(mod) -> bool:
             and (int(w.shape[1]) * 32 // int(mod.bits)) % GROUP == 0 and int(w.shape[0]) % 8 == 0)
 
 
+S_MAX = 32          # the most simdgroups per threadgroup geometry() asks for (1024 threads)
+_s_cap = S_MAX
+
+
+def s_cap() -> int:
+    return _s_cap
+
+
+def set_s_cap(n: int) -> None:
+    """Clamp the split-K simdgroups per threadgroup to ``n`` for this process.
+
+    A launch may use at most ``maxTotalThreadsPerThreadgroup`` threads, and that limit belongs
+    to the compiled pipeline (its register footprint), not to the chip: M3/M4 admit this
+    kernel at 1024 threads (S=32), while an M2 Pro refuses it at S=32 (ceiling 832) and again
+    at S=16 (ceiling 448, PR #39) — and mlx raises at launch, so geometry() asking for more
+    used to abort calibration before a single token. :func:`~.small_m_qmm.measure_shapes`
+    lowers the cap on a refused launch and the cap is cached with the shape verdicts, so the
+    dispatch only ever launches geometries that launched in calibration. Any S works: K
+    groups are interleaved over the simdgroups and the partials scale with S."""
+    global _s_cap
+    _s_cap = max(1, min(S_MAX, int(n)))
+
+
+def is_threadgroup_refusal(e: BaseException) -> bool:
+    """mlx's launch-time refusal: "Thread group size (1024) is greater than the maximum
+    allowed threads per threadgroup (448)"."""
+    msg = str(e).lower()
+    return "thread group" in msg or "threadgroup" in msg
+
+
 def geometry(n: int, rt: int = 1) -> tuple[int, int]:
     """``(NT, S)``: 8-output tiles per simdgroup and simdgroups (split-K chunks) per
     threadgroup. Wide outputs take 4 tiles × 8 chunks (the measured best on every
     4096+-output shape); narrow ones trade tiles for K-splits so the grid still fills the GPU
     — at N=48 (a hybrid's gate projections) a fixed 4×8 launches 2 threadgroups and ran 0.92×
     of stock. The split-K partials (S·RT·NT·64 floats) stay within 16 KB of threadgroup
-    memory for two row tiles and 16-32 KB for one."""
+    memory for two row tiles and 16-32 KB for one. S is clamped to :func:`s_cap`."""
     if n >= 4096:
-        return 4, 8
-    if n >= 1024:
-        return (4 if rt == 1 else 2), 16
-    return (2 if rt == 1 and n % 16 == 0 else 1), 32
+        nt, s = 4, 8
+    elif n >= 1024:
+        nt, s = (4 if rt == 1 else 2), 16
+    else:
+        nt, s = (2 if rt == 1 and n % 16 == 0 else 1), 32
+    return nt, min(s, _s_cap)
 
 
 def plan(rows: int, n: int, k: int, bits: int, dtype=mx.bfloat16):
@@ -222,9 +254,10 @@ def call(mod, x: mx.array, rows: int) -> mx.array:
         plans = {}
         object.__setattr__(mod, "_dspark_skinny", plans)    # not a parameter
     k = x.shape[-1]
-    p = plans.get(rows)
+    p = plans.get((rows, _s_cap))
     if p is None:
-        p = plans[rows] = plan(rows, int(mod["weight"].shape[0]), int(k), int(mod.bits), x.dtype)
+        p = plans[(rows, _s_cap)] = plan(rows, int(mod["weight"].shape[0]), int(k),
+                                         int(mod.bits), x.dtype)
     y = qmm(x.reshape(rows, k), mod["weight"], mod["scales"], mod["biases"], int(mod.bits), _plan=p)
     y = y.reshape(*x.shape[:-1], y.shape[-1])
     if "bias" in mod:

@@ -148,6 +148,12 @@ def measure_shapes(*models, verbose: bool = False) -> list[str]:
     shape must win by ``_MIN_GAIN`` at M=8 and at M=12 (the two tile regimes: one and two
     8-row tiles), and a 4-bit shape must not lose at its bottom edge M=5. Returns the shape
     keys that pass; anything else stays on the stock path at stock speed and stock numerics.
+
+    A launch this GPU refuses for its threadgroup size (M1/M2 — see
+    :func:`~.skinny_qmm.set_s_cap`) halves the split-K cap and re-measures every shape at the
+    new geometry, so the verdicts and :func:`~.skinny_qmm.s_cap` (which the caller caches with
+    them) always describe launches that ran. Any other kernel failure rejects that shape.
+    Nothing here may abort the load: the stock path is always there.
     """
     groups: dict[str, list] = {}
     for model in models:
@@ -157,52 +163,71 @@ def measure_shapes(*models, verbose: bool = False) -> list[str]:
             if eligible(mod):
                 groups.setdefault(shape_key(mod), []).append(mod)
 
-    won: list[str] = []
-    for key, mods in groups.items():
-        mod = mods[0]
-        K = _in_features(mod)
-        lo, hi = _sk.WINDOW[int(mod.bits)]
+    _sk.set_s_cap(_sk.S_MAX)
+    while True:
+        won: list[str] = []
+        refused = None
+        for key, mods in groups.items():
+            try:
+                on = _verdict(key, mods, verbose)
+            except Exception as e:  # noqa: BLE001 — a kernel that won't launch is simply off
+                if _sk.is_threadgroup_refusal(e) and _sk.s_cap() > 1:
+                    refused = e
+                    break
+                if verbose:
+                    print(f"  small-M qmm: {key} rejected (kernel unavailable: "
+                          f"{type(e).__name__}: {e})", flush=True)
+                continue
+            if on:
+                won.append(key)
+        if refused is None:
+            return won
+        _sk.set_s_cap(_sk.s_cap() // 2)
+        if verbose:
+            print(f"  small-M qmm: launch refused ({refused}) — re-measuring at "
+                  f"{_sk.s_cap()} simdgroups per threadgroup", flush=True)
 
-        ok = True
-        for M in sorted({lo, 8, 12, hi}):
-            x = (mx.random.normal((M, K)) * 0.1).astype(mx.bfloat16)
-            ref = _orig_call(mod, x).astype(mx.float32)
-            got = _kernel_rows(mod, x).astype(mx.float32)
-            diff = mx.max(mx.abs(ref - got))
-            scale = mx.max(mx.abs(ref))
-            mx.eval(diff, scale)
-            if diff.item() > _REL_TOL * max(scale.item(), 1.0):
-                ok = False
-                break
-        if not ok:
+
+def _verdict(key: str, mods: list, verbose: bool) -> bool:
+    """Numerics gate then race for one shape (see :func:`measure_shapes`)."""
+    mod = mods[0]
+    K = _in_features(mod)
+    lo, hi = _sk.WINDOW[int(mod.bits)]
+
+    for M in sorted({lo, 8, 12, hi}):
+        x = (mx.random.normal((M, K)) * 0.1).astype(mx.bfloat16)
+        ref = _orig_call(mod, x).astype(mx.float32)
+        got = _kernel_rows(mod, x).astype(mx.float32)
+        diff = mx.max(mx.abs(ref - got))
+        scale = mx.max(mx.abs(ref))
+        mx.eval(diff, scale)
+        if diff.item() > _REL_TOL * max(scale.item(), 1.0):
             if verbose:
                 print(f"  small-M qmm: {key} rejected (numerics)", flush=True)
-            continue
+            return False
 
-        def race(M, _m=mods, _K=K):
-            x = (mx.random.normal((M, _K)) * 0.1).astype(mx.bfloat16)
-            mx.eval(x)
+    def race(M):
+        x = (mx.random.normal((M, K)) * 0.1).astype(mx.bfloat16)
+        mx.eval(x)
 
-            def q_step(xx, t):
-                return _orig_call(_m[t % len(_m)], xx)
+        def q_step(xx, t):
+            return _orig_call(mods[t % len(mods)], xx)
 
-            def k_step(xx, t):
-                return _kernel_rows(_m[t % len(_m)], xx)
+        def k_step(xx, t):
+            return _kernel_rows(mods[t % len(mods)], xx)
 
-            tq = min(_time_chain(q_step, x), _time_chain(q_step, x))
-            tk = min(_time_chain(k_step, x), _time_chain(k_step, x))
-            return tq / tk
+        tq = min(_time_chain(q_step, x), _time_chain(q_step, x))
+        tk = min(_time_chain(k_step, x), _time_chain(k_step, x))
+        return tq / tk
 
-        g8, g12 = race(8), race(12)
-        g_lo = race(lo) if lo < 6 else None
-        on = g8 >= _MIN_GAIN and g12 >= _MIN_GAIN and (g_lo is None or g_lo >= _EDGE_MIN)
-        if on:
-            won.append(key)
-        if verbose:
-            edge = f", M={lo} {g_lo:.2f}x" if g_lo is not None else ""
-            print(f"  small-M qmm: {key} M=8 {g8:.2f}x, M=12 {g12:.2f}x{edge} "
-                  f"({'on' if on else 'off'})", flush=True)
-    return won
+    g8, g12 = race(8), race(12)
+    g_lo = race(lo) if lo < 6 else None
+    on = g8 >= _MIN_GAIN and g12 >= _MIN_GAIN and (g_lo is None or g_lo >= _EDGE_MIN)
+    if verbose:
+        edge = f", M={lo} {g_lo:.2f}x" if g_lo is not None else ""
+        print(f"  small-M qmm: {key} M=8 {g8:.2f}x, M=12 {g12:.2f}x{edge} "
+              f"({'on' if on else 'off'})", flush=True)
+    return on
 
 
 def ids_for_shapes(shapes, *models) -> frozenset:

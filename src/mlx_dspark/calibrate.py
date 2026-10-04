@@ -960,7 +960,13 @@ def small_m_qmm_shapes(target, drafter=None, *, target_repo: str,
     :func:`apply_small_m` to self-heal a cache written before a ``shape_key`` format
     change (the stored shape strings would match no live module, silently disabling the
     kernel with no error). The cache key carries the SCHEMA but not the shape-key format,
-    so this is the backstop for that; keep it."""
+    so this is the backstop for that; keep it.
+
+    The entry also carries ``s_cap``, the split-K ceiling the verdicts were measured at
+    (lowered on GPUs that refuse 1024/512-thread launches — M1/M2, PR #39); it is re-applied
+    on every load so the dispatch launches exactly the geometries that were raced. Entries
+    without it predate the field and ran at the full 32."""
+    from . import skinny_qmm as _sk
     from .small_m_qmm import measure_shapes
 
     gen = _gpu_gen()
@@ -979,12 +985,15 @@ def small_m_qmm_shapes(target, drafter=None, *, target_repo: str,
             print("calibrating small-M qmm kernel (one-time, cached)…", flush=True)
         shapes = measure_shapes(getattr(target, "model", target), drafter,
                                 verbose=verbose)
-        entry = {"shapes": shapes}
+        entry = {"shapes": shapes, "s_cap": _sk.s_cap()}
         save_cached(key, entry, cache_dir)
         if verbose:
             state = (f"on for {len(shapes)} weight shapes"
                      if shapes else "off (no gain, or numerics reject, on this machine)")
+            if _sk.s_cap() < _sk.S_MAX:
+                state += f" (≤{_sk.s_cap()} simdgroups per threadgroup on this GPU)"
             print(f"  small-M qmm: {state}", flush=True)
+    _sk.set_s_cap(entry.get("s_cap", _sk.S_MAX))
     return entry.get("shapes") or []
 
 

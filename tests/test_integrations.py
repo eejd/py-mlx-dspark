@@ -18,10 +18,11 @@ class TestCoverage:
         for r in rows():
             assert r["setup"], f"{r['id']} has no setup steps"
 
-    def test_protocol_is_anthropic_only_for_claude_code(self):
+    def test_protocols_match_the_documented_setups(self):
         by_id = {r["id"]: r for r in rows()}
-        assert by_id["claude-code"]["protocol"] == "anthropic"
-        for other in ("codex", "opencode", "pi", "openai-compatible"):
+        for anthropic in ("claude-code", "pi"):         # pi: the README's tested form
+            assert by_id[anthropic]["protocol"] == "anthropic"
+        for other in ("codex", "opencode", "openai-compatible"):
             assert by_id[other]["protocol"] == "openai"
 
 
@@ -69,12 +70,46 @@ class TestOpenAIAgents:
         assert 'model = "Qwen3-8B-8bit"' in toml
         assert codex["setup"][0]["path"] == "~/.codex/config.toml"
 
+    def test_codex_uses_the_responses_api_and_sets_its_key(self):
+        """Codex dropped Chat Completions — a ``wire_api = "chat"`` provider cannot connect —
+        and fails without the ``env_key`` variable set."""
+        import tomllib
+
+        codex = next(r for r in rows(key="abc") if r["id"] == "codex")
+        cfg = tomllib.loads(codex["setup"][0]["content"])
+        provider = cfg["model_providers"]["mlx-dspark"]
+        assert provider["wire_api"] == "responses"
+        assert provider["base_url"] == "http://127.0.0.1:8080/v1"
+        assert cfg["profiles"]["mlx-dspark"] == {"model_provider": "mlx-dspark",
+                                                 "model": "Qwen3-8B-8bit"}
+        command = codex["setup"][1]["command"]
+        assert f"{provider['env_key']}=abc" in command and "--profile mlx-dspark" in command
+
     def test_opencode_and_pi_emit_valid_json(self):
         for agent_id in ("opencode", "pi"):
             agent = next(r for r in rows() if r["id"] == agent_id)
             content = agent["setup"][0]["content"]
             parsed = json.loads(content)              # must parse
             assert "Qwen3-8B-8bit" in json.dumps(parsed)
+
+    def test_pi_matches_the_readme_tested_config(self):
+        """``~/.pi/agent/models.json``, camelCase keys, the Anthropic endpoint at the bare
+        base URL — the form the README measured (not ``~/.pi/models.json`` / ``base_url``)."""
+        pi = next(r for r in I.integrations("http://127.0.0.1:8080", "Qwen3-8B-8bit", None,
+                                            40960) if r["id"] == "pi")
+        step = pi["setup"][0]
+        assert step["path"] == "~/.pi/agent/models.json"
+        provider = json.loads(step["content"])["providers"]["mlx-dspark"]
+        assert provider == {
+            "baseUrl": "http://127.0.0.1:8080", "api": "anthropic-messages",
+            "apiKey": "mlx-dspark",
+            "models": [{"id": "Qwen3-8B-8bit", "contextWindow": 40960, "maxTokens": 8192}],
+        }
+        assert pi["setup"][1]["command"] == "pi --provider mlx-dspark --model Qwen3-8B-8bit"
+        # unknown context window: the limits are left to pi's defaults
+        unknown = next(r for r in rows() if r["id"] == "pi")
+        models = json.loads(unknown["setup"][0]["content"])["providers"]["mlx-dspark"]["models"]
+        assert models == [{"id": "Qwen3-8B-8bit"}]
 
     def test_openai_compatible_exposes_the_three_fields_a_gui_asks_for(self):
         generic = next(r for r in rows() if r["id"] == "openai-compatible")
