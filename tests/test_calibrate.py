@@ -389,7 +389,8 @@ def test_small_m_gated_off_on_m5(monkeypatch):
 def test_small_m_cap_is_cached_with_the_verdicts(monkeypatch, tmp_path):
     """The split-K cap a GPU forced during calibration (M1/M2, PR #39) is stored with the
     shape verdicts and re-applied on a cached load — otherwise the next process would dispatch
-    the full geometry its driver refuses. Entries written before the field mean the full cap."""
+    the full geometry its driver refuses. An entry that doesn't record its launch size (PR
+    #39's branch wrote verdicts raced at a smaller S) is re-measured, never replayed at 32."""
     import sys
 
     import mlx.core as mx
@@ -413,12 +414,24 @@ def test_small_m_cap_is_cached_with_the_verdicts(monkeypatch, tmp_path):
         sk.set_s_cap(sk.S_MAX)              # a fresh process
         monkeypatch.setattr(smm, "measure_shapes", lambda *a, **k: pytest.fail("re-measured"))
         assert run() == ["2048x512b4"] and sk.s_cap() == 8      # restored from the cache
-        key = calib._cache_key("smallm", "old", None)
-        calib.save_cached(key, {"shapes": ["2048x512b4"]}, str(tmp_path))
-        sk.set_s_cap(8)
-        calib.small_m_qmm_shapes(object(), target_repo="old", cache_dir=str(tmp_path),
-                                 verbose=False)
-        assert sk.s_cap() == sk.S_MAX                           # pre-field entry: full cap
+        # entries without the launch size: re-measured (and stamped), not replayed at S=32
+        remeasured = []
+
+        def again(*a, **k):
+            remeasured.append(1)
+            sk.set_s_cap(8)
+            return ["2048x512b4"]
+        monkeypatch.setattr(smm, "measure_shapes", again)
+        for i, stale in enumerate(({"shapes": ["2048x512b4"]},                  # PR #39 branch
+                                   {"shapes": ["2048x512b4"], "s_cap": 16})):  # other S_MAX
+            repo = f"old{i}"
+            calib.save_cached(calib._cache_key("smallm", repo, None), stale, str(tmp_path))
+            sk.set_s_cap(sk.S_MAX)
+            calib.small_m_qmm_shapes(object(), target_repo=repo, cache_dir=str(tmp_path),
+                                     verbose=False)
+            assert sk.s_cap() == 8 and len(remeasured) == i + 1
+            entry = calib.load_cached(calib._cache_key("smallm", repo, None), str(tmp_path))
+            assert entry["s_cap"] == 8 and entry["s_max"] == sk.S_MAX
     finally:
         sk.set_s_cap(sk.S_MAX)
 

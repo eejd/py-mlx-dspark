@@ -963,9 +963,12 @@ def small_m_qmm_shapes(target, drafter=None, *, target_repo: str,
     so this is the backstop for that; keep it.
 
     The entry also carries ``s_cap``, the split-K ceiling the verdicts were measured at
-    (lowered on GPUs that refuse 1024/512-thread launches — M1/M2, PR #39); it is re-applied
-    on every load so the dispatch launches exactly the geometries that were raced. Entries
-    without it predate the field and ran at the full 32."""
+    (lowered on GPUs that refuse 1024/512-thread launches — M1/M2, PR #39), and ``s_max``,
+    the full size of the build that measured them; ``s_cap`` is re-applied on every load so
+    the dispatch launches exactly the geometries that were raced. An entry without both was
+    written by a build that didn't record its launch size — PR #39's branch raced shapes at
+    a smaller size, and replaying those verdicts at the full 32 got the launch refused on an
+    M2 Pro (warmup, and any verify width the kernel serves) — so it is re-measured once."""
     from . import skinny_qmm as _sk
     from .small_m_qmm import measure_shapes
 
@@ -980,12 +983,14 @@ def small_m_qmm_shapes(target, drafter=None, *, target_repo: str,
 
     key = _cache_key("smallm", target_repo, drafter_repo)
     entry = None if refresh else load_cached(key, cache_dir)
+    if entry is not None and ("s_cap" not in entry or entry.get("s_max") != _sk.S_MAX):
+        entry = None                        # unknown launch size: re-measure once
     if entry is None:
         if verbose:
             print("calibrating small-M qmm kernel (one-time, cached)…", flush=True)
         shapes = measure_shapes(getattr(target, "model", target), drafter,
                                 verbose=verbose)
-        entry = {"shapes": shapes, "s_cap": _sk.s_cap()}
+        entry = {"shapes": shapes, "s_cap": _sk.s_cap(), "s_max": _sk.S_MAX}
         save_cached(key, entry, cache_dir)
         if verbose:
             state = (f"on for {len(shapes)} weight shapes"
@@ -1216,6 +1221,17 @@ def _stale_mra_refusal(hit: dict) -> bool:
             and str(rep.get("reason", "")).startswith("kernel unavailable"))
 
 
+def _foreign_geometry(hit: dict) -> bool:
+    """A verdict probed at a different launch size than this build uses. A window holds only
+    for the threadgroups the probe actually launched; PR #39's branch probed at 14 simdgroups,
+    so its cached windows admitted widths this build launches at up to 32 — which an M2 Pro
+    refuses in the middle of a request. Verdicts without the ``max_sg`` stamp (0.20.0-0.20.2,
+    or another build) are re-probed once."""
+    from .multirow_attn import MAX_SG
+
+    return (hit.get("report") or {}).get("max_sg") != MAX_SG
+
+
 def multirow_windows(shapes, *, cache_dir=None, refresh=False, verbose=True) -> list:
     """Measured :class:`~mlx_dspark.multirow_attn.Window` per attention shape — raced and
     numerics-checked once per (chip x mlx x shape), ~2 s each, cached."""
@@ -1226,7 +1242,7 @@ def multirow_windows(shapes, *, cache_dir=None, refresh=False, verbose=True) -> 
     for hq, hk, d in shapes:
         key = f"v{SCHEMA}|{dev}|mlx{mx.__version__}|mra1|{hq}x{hk}x{d}"
         hit = None if refresh else load_cached(key, cache_dir)
-        if hit is not None and _stale_mra_refusal(hit):
+        if hit is not None and (_stale_mra_refusal(hit) or _foreign_geometry(hit)):
             hit = None
         if hit is None:
             if verbose:

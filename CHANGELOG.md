@@ -2,6 +2,11 @@
 
 All notable changes to `mlx-dspark`. Versions follow [SemVer](https://semver.org/) (pre-1.0: minor-ish features land as patch bumps).
 
+## [0.20.3] — 2026-10-05 — stale kernel calibration can't crash speculation on M1/M2
+
+### Fixed
+- **A calibration cache written by another build could crash speculative decoding on M1/M2 (issue #41 / PR #39 follow-up, reported by @Tobias-Conrad).** v0.20.2 read a cached small-M verdict without a recorded kernel size as "measured at full size". A cache left by a build that raced at a smaller size (PR #39's branch) was then replayed at 1024/512 threads per threadgroup, which an M2 Pro refuses — `--warmup` was skipped, and any request at a draft cap of 4 or more would have failed mid-generation. Cached small-M verdicts and multi-row attention windows now record the launch size they were measured at, and anything without it, or measured at another size, is re-measured once. On M3/M4 this costs one re-measure of a few seconds after upgrading, with the same verdicts.
+
 ## [0.20.2] — 2026-10-04 — works with mlx-lm 0.32, starts on M1/M2, faster sampling
 
 ### Fixed

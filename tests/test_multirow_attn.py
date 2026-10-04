@@ -205,24 +205,26 @@ def test_measure_window_refused_at_the_first_q_is_off(monkeypatch):
 
 def test_only_stale_unavailable_verdicts_are_reprobed(tmp_path, monkeypatch):
     # A v0.20.0 "kernel unavailable" verdict (no "probe" stamp) is re-probed once; windows
-    # and every other refusal stay cached, so a machine where 0.20.0 worked re-measures
-    # nothing, and the re-probed verdict (probe 2) is never re-probed again.
+    # and every other refusal stamped with this build's launch size stay cached, and the
+    # re-probed verdict (probe 2) is never re-probed again.
     import importlib
 
     C = importlib.import_module("mlx_dspark.calibrate")
     dev = mx.device_info().get("device_name", "unknown")
     key = lambda s: f"v{C.SCHEMA}|{dev}|mlx{mx.__version__}|mra1|{s}"  # noqa: E731
     cache = str(tmp_path)
+    sg = {"max_sg": mra.MAX_SG}
     C.save_cached(key("32x2x128"), {"window": None, "report": {
-        "reason": "kernel unavailable: ValueError: " + _LIMIT}}, cache)
+        "reason": "kernel unavailable: ValueError: " + _LIMIT, **sg}}, cache)
     C.save_cached(key("24x4x256"), {"window": {"min_q": 2, "max_q": 16, "min_kv": 1024},
-                                    "report": {}}, cache)
-    C.save_cached(key("16x2x128"), {"window": None, "report": {"reason": "no win"}}, cache)
+                                    "report": dict(sg)}, cache)
+    C.save_cached(key("16x2x128"), {"window": None, "report": {"reason": "no win", **sg}},
+                  cache)
     probed = []
 
     def fake(hq, hk, d, **kw):
         probed.append((hq, hk, d))
-        return {"min_q": 2, "max_q": 6, "min_kv": 1024}, {"probe": 2}
+        return {"min_q": 2, "max_q": 6, "min_kv": 1024}, {"probe": 2, **sg}
 
     monkeypatch.setattr(mra, "measure_window", fake)
     shapes = [(32, 2, 128), (24, 4, 256), (16, 2, 128)]
@@ -231,3 +233,40 @@ def test_only_stale_unavailable_verdicts_are_reprobed(tmp_path, monkeypatch):
     assert {(w.hq, w.max_q) for w in wins} == {(32, 6), (24, 16)}
     C.multirow_windows(shapes, cache_dir=cache, verbose=False)
     assert probed == [(32, 2, 128)]                        # the re-probed verdict stands
+
+
+def test_windows_probed_at_another_launch_size_are_reprobed(tmp_path, monkeypatch):
+    # PR #39's branch probed at 14 simdgroups and cached windows up to q=16; replayed at this
+    # build's 32 (1024 threads) the launch was refused mid-request on an M2 Pro. A verdict is
+    # only trusted at the launch size it was probed at — unstamped (0.20.0-0.20.2) or foreign
+    # stamps are re-probed once, then stand.
+    import importlib
+
+    C = importlib.import_module("mlx_dspark.calibrate")
+    dev = mx.device_info().get("device_name", "unknown")
+    key = lambda s: f"v{C.SCHEMA}|{dev}|mlx{mx.__version__}|mra1|{s}"  # noqa: E731
+    cache = str(tmp_path)
+    wide = {"min_q": 2, "max_q": 16, "min_kv": 1024}
+    C.save_cached(key("16x2x256"), {"window": wide, "report": {"probe": 2, "max_sg": 14}},
+                  cache)
+    C.save_cached(key("32x8x128"), {"window": wide, "report": {"probe": 2}}, cache)
+    probed = []
+
+    def fake(hq, hk, d, **kw):
+        probed.append((hq, hk, d))
+        return {"min_q": 2, "max_q": 12, "min_kv": 1024}, {"probe": 2, "max_sg": mra.MAX_SG}
+
+    monkeypatch.setattr(mra, "measure_window", fake)
+    shapes = [(16, 2, 256), (32, 8, 128)]
+    wins = C.multirow_windows(shapes, cache_dir=cache, verbose=False)
+    assert probed == shapes
+    assert {w.max_q for w in wins} == {12}
+    C.multirow_windows(shapes, cache_dir=cache, verbose=False)
+    assert probed == shapes                                 # stamped now: never again
+
+
+def test_measure_window_stamps_its_launch_size(monkeypatch):
+    monkeypatch.setattr(mra, "PROBE_KV", (1024,))
+    monkeypatch.setattr(mra, "PROBE_Q", (2,))
+    _, report = mra.measure_window(32, 8, 128)
+    assert report["max_sg"] == mra.MAX_SG

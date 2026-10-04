@@ -376,7 +376,9 @@ def measure_window(hq: int, hk: int, d: int, *, dtype=mx.bfloat16,
     scale = 1.0 / math.sqrt(d)
     # "probe" 2 = per-width launch handling (a refused wide q ends the window instead of
     # disabling the shape); calibrate re-probes older "kernel unavailable" verdicts once.
-    report: dict = {"shape": f"{hq}x{hk}x{d}", "points": {}, "probe": 2}
+    # "max_sg" stamps the launch size the window was probed at: a window is only valid for
+    # the geometry plan() produced while probing it (see calibrate._foreign_geometry).
+    report: dict = {"shape": f"{hq}x{hk}x{d}", "points": {}, "probe": 2, "max_sg": MAX_SG}
     wins_at: dict[int, list[int]] = {}
     try:
         for kv in PROBE_KV:
